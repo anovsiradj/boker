@@ -69,16 +69,18 @@ const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'modu
 ```
 
 ```js
-// offscreen/worker.js — worker entry
+// offscreen/worker.js — worker entry using import
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+
 self.onmessage = async (e) => {
+  await initDatabase();
   // ...
 };
 ```
 
 ## Import Patterns
 
-### Bare Specifiers (with Vite bundler)
+### Bare Specifiers (with Vite)
 
 ```js
 // Vite resolves these from node_modules
@@ -86,7 +88,7 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import browser from 'webextension-polyfill';
 ```
 
-### Relative Imports (works in all contexts)
+### Relative Imports (works everywhere)
 
 ```js
 import { foo } from './shared/utils.js';
@@ -96,7 +98,7 @@ import { bar } from '../worker/database.js';
 ### Import Maps (HTML documents only)
 
 ```html
-<!-- In popup.html, offscreen.html — NOT in workers or service workers -->
+<!-- In popup.html or offscreen.html — NOT in workers or service workers -->
 <script type="importmap">
 {
   "imports": {
@@ -106,13 +108,7 @@ import { bar } from '../worker/database.js';
 </script>
 ```
 
-**Import maps only work in HTML documents** (popup, offscreen, side panel). They do **not** work in service workers, web workers, or content scripts. Use a bundler (Vite) for those contexts.
-
-### Dynamic Imports
-
-```js
-const { heavy } = await import('./heavy-module.js');
-```
+**Import maps only work in HTML documents** (popup, offscreen, side panel). They do not work in service workers, web workers, or content scripts. Use Vite for those contexts.
 
 ## Shared Modules Pattern
 
@@ -120,12 +116,15 @@ const { heavy } = await import('./heavy-module.js');
 src/
 ├── pages/
 │   ├── background/index.js
-│   ├── offscreen/index.js
+│   ├── offscreen/
+│   │   ├── index.js
+│   │   ├── worker.js
+│   │   └── worker/
+│   │       └── database.js
 │   └── popup/index.js
 └── shared/
-    ├── storage.js      # chrome.storage wrapper
-    ├── messaging.js    # Message types + helpers
-    └── utils.js        # Pure functions
+    ├── storage.js
+    └── utils.js
 ```
 
 ```js
@@ -139,30 +138,13 @@ export async function get(key, defaultValue) {
 }
 ```
 
-## TypeScript Setup
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": ["ES2022", "WebWorker"],
-    "types": ["chrome"],
-    "strict": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "allowImportingTsExtensions": true,
-    "resolveJsonModule": true
-  },
-  "include": ["src/**/*"]
-}
-```
-
-## Bundler Setup (Vite)
+## Vite Bundler Setup
 
 ```ts
 // vite.config.ts
+import { defineConfig } from 'vite';
+import path from 'path';
+
 export default defineConfig({
   build: {
     target: 'chrome116',
@@ -185,11 +167,27 @@ Vite bundles all imports, resolves bare specifiers from `node_modules`, and hand
 ## WASM Module Import
 
 ```js
-// Direct import from node_modules — Vite bundles the JS wrapper and copies .wasm
+// Direct import — Vite bundles the JS wrapper and copies .wasm
 import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 ```
 
 No need to copy `.wasm` files to `lib/` or configure `locateFile` when using Vite.
+
+## Message Routing with OFFSCREEN_ Prefix
+
+Since `chrome.runtime.sendMessage` broadcasts to all extension contexts, namespace offscreen-bound messages to prevent collision:
+
+```js
+// Background: prefix messages to offscreen
+chrome.runtime.sendMessage({ type: 'OFFSCREEN_' + type, payload });
+
+// Offscreen: only handle OFFSCREEN_* messages
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message.type?.startsWith('OFFSCREEN_')) return;
+  const type = message.type.slice('OFFSCREEN_'.length);
+  // ...
+});
+```
 
 ## CSP Requirements
 
@@ -202,19 +200,39 @@ No need to copy `.wasm` files to `lib/` or configure `locateFile` when using Vit
 - No `'unsafe-eval'` needed for ESM (only for bundled IIFE)
 - `'wasm-unsafe-eval'` for WASM instantiation
 
+## TypeScript Setup
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "WebWorker"],
+    "types": ["chrome"],
+    "strict": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"]
+}
+```
+
 ## Common Issues
 
 | Issue | Fix |
 |-------|-----|
 | `Unexpected token 'export'` | File not loaded as module — check `type: "module"` or `<script type="module">` |
 | `Cannot use import statement outside module` | Same as above |
-| `ERR_UNKNOWN_URL_SCHEME` | Use relative paths or `chrome.runtime.getURL()` |
-| Worker not loading | Ensure `.js` extension, `{ type: "module" }`, and correct path |
+| Worker not loading | Use `new Worker(url, { type: 'module' })` with correct URL |
 | Circular imports | Restructure shared modules, use dynamic import for one side |
 | `SharedArrayBuffer is not defined` | Not needed for sqlite-wasm — remove COOP/COEP headers |
+| Offscreen intercepting messages | Use `OFFSCREEN_` prefix to namespace messages |
 
 ## Debugging
 
 - DevTools → Sources → shows original module files (with Vite source maps)
 - Console errors show correct file:line
-- Worker console available via `chrome://inspect` → Workers
+- Worker console: `chrome://inspect` → Workers

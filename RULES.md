@@ -20,8 +20,8 @@ semua query harus dilakukan menggunakan metode upsert, create jika tidak ada, up
 
 semua tabel harus punya kolom created_at,updated_at.
 
-tabel link digunakan untuk simpan URL yang dimasukan user secara apa adanya.
-tabel host digunakan untuk simpan domain/subdomain dari hasil parse URL yang dimasukan user.
+tabel `link` digunakan untuk simpan URL/link yang dimasukan user secara apa adanya.
+tabel `host` digunakan untuk simpan domain/host dari hasil parse URL yang dimasukan user.
 
 selalu bikin backup file db ketika import file db dari user.
 

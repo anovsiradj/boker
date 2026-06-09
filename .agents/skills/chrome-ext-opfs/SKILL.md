@@ -17,14 +17,50 @@ Use OPFS (Origin Private File System) in Manifest V3 Chrome Extensions for perfo
 ## Architecture
 
 ```
-Extension Context          OPFS Access
-─────────────────          ───────────
-Service Worker      →  Cannot access OPFS directly (no createSyncAccessHandle)
-Offscreen Document  →  Cannot access OPFS directly (no createSyncAccessHandle)
-Web Worker          →  ✅ Full OPFS + createSyncAccessHandle (via offscreen)
+Popup/Content Script
+       │
+       ▼
+chrome.runtime.sendMessage  (type: 'GET_BLOCKED_DOMAINS', 'INSERT_HOST', etc.)
+       │
+       ▼
+Background Service Worker
+       │
+       ▼
+chrome.runtime.sendMessage  (type: 'OFFSCREEN_GET_BLOCKED_DOMAINS', 'OFFSCREEN_INSERT_HOST', etc.)
+       │
+       ▼
+Offscreen Document (chrome.offscreen.createDocument + WORKERS)
+  └─ chrome.runtime.onMessage: only responds to types starting with 'OFFSCREEN_'
+       │
+       ▼
+Web Worker (new Worker('./worker.js', { type: 'module' }))
+  └─ self.onmessage / self.postMessage
+       │
+       ▼
+OPFS (createSyncAccessHandle)
 ```
 
-**Required pattern:** Service Worker → Offscreen Document → Web Worker → OPFS
+## Message Routing (OFFSCREEN_ Prefix)
+
+To prevent the offscreen document from intercepting messages meant for the background (since `chrome.runtime.sendMessage` broadcasts to all extension contexts), namespace offscreen-bound messages with `OFFSCREEN_`:
+
+```js
+// Background: send to offscreen with prefix
+async function sendToOffscreen(type, payload = {}) {
+  await ensureOffscreenDocument();
+  return chrome.runtime.sendMessage({ type: 'OFFSCREEN_' + type, payload });
+}
+
+// Offscreen: only handle OFFSCREEN_* messages
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const { type, payload } = message;
+  if (!type || !type.startsWith('OFFSCREEN_')) return;
+  handleMessage(type.slice('OFFSCREEN_'.length), payload)
+    .then(sendResponse)
+    .catch(err => sendResponse({ error: err.message }));
+  return true;
+});
+```
 
 ## Manifest Setup (Minimal)
 
@@ -39,7 +75,7 @@ Web Worker          →  ✅ Full OPFS + createSyncAccessHandle (via offscreen)
 }
 ```
 
-**COOP/COEP headers are NOT required** — do NOT add `cross_origin_embedder_policy` or `cross_origin_opener_policy`. They work without them and may cause service worker issues.
+**COOP/COEP headers are NOT required** — do not add `cross_origin_embedder_policy` or `cross_origin_opener_policy`. They work without them and may cause service worker issues.
 
 ## Offscreen Document Setup
 
@@ -52,13 +88,13 @@ Web Worker          →  ✅ Full OPFS + createSyncAccessHandle (via offscreen)
 ```js
 // offscreen/index.js
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-const pending = new Map();
+const pendingRequests = new Map();
 
 worker.onmessage = (e) => {
   const { id, payload, error } = e.data;
-  const resolver = pending.get(id);
+  const resolver = pendingRequests.get(id);
   if (resolver) {
-    pending.delete(id);
+    pendingRequests.delete(id);
     error ? resolver.reject(new Error(error)) : resolver.resolve(payload);
   }
 };
@@ -67,78 +103,26 @@ function sendToWorker(type, payload) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
     const timeout = setTimeout(() => {
-      pending.delete(id);
+      pendingRequests.delete(id);
       reject(new Error(`Worker timeout for ${type}`));
     }, 10000);
-    pending.set(id, { resolve, reject, timeout });
+    pendingRequests.set(id, { resolve, reject, timeout });
     worker.postMessage({ id, type, payload });
   });
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  handleMessage(msg).then(sendResponse).catch(e => sendResponse({ error: e.message }));
+// Only handle OFFSCREEN_* messages (from background)
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const { type, payload } = message;
+  if (!type || !type.startsWith('OFFSCREEN_')) return;
+  handleMessage(type.slice('OFFSCREEN_'.length), payload)
+    .then(sendResponse)
+    .catch(err => sendResponse({ error: err.message }));
   return true;
 });
-
-async function handleMessage(message) {
-  const { type, payload } = message;
-  switch (type) {
-    case 'WRITE_FILE':
-      return await sendToWorker('WRITE_FILE', payload);
-    case 'READ_FILE':
-      return { content: await sendToWorker('READ_FILE', payload) };
-    default:
-      throw new Error(`Unknown type: ${type}`);
-  }
-}
 ```
 
 **Key:** No `OFFSCREEN_READY` handshake needed. `createDocument()` resolves after the page (and its worker) have loaded.
-
-## OPFS Worker Pattern
-
-```js
-// offscreen/worker.js
-self.onmessage = async ({ data: { id, type, payload } }) => {
-  try {
-    const root = await navigator.storage.getDirectory();
-    let result;
-    switch (type) {
-      case 'WRITE_FILE': {
-        const handle = await root.getFileHandle(payload.name, { create: true });
-        const syncHandle = await handle.createSyncAccessHandle();
-        const buffer = new TextEncoder().encode(payload.content);
-        syncHandle.write(buffer);
-        syncHandle.close();
-        result = { success: true };
-        break;
-      }
-      case 'READ_FILE': {
-        const handle = await root.getFileHandle(payload.name);
-        const syncHandle = await handle.createSyncAccessHandle();
-        const size = syncHandle.getSize();
-        const buffer = new DataView(new ArrayBuffer(size));
-        syncHandle.read(buffer);
-        syncHandle.close();
-        result = new TextDecoder().decode(buffer);
-        break;
-      }
-      case 'LIST_FILES': {
-        const files = [];
-        for await (const [name] of root.entries()) files.push(name);
-        result = files;
-        break;
-      }
-      case 'DELETE_FILE': {
-        await root.removeEntry(payload.name);
-        result = { success: true };
-        break;
-      }
-    }
-    self.postMessage({ id, payload: result });
-  } catch (e) { self.postMessage({ id, error: e.message }); }
-};
-```
 
 ## Background Integration
 
@@ -158,36 +142,20 @@ async function ensureOffscreenDocument() {
   creating = null;
 }
 
-async function opfsWrite(name, content) {
+async function sendToOffscreen(type, payload = {}) {
   await ensureOffscreenDocument();
-  return chrome.runtime.sendMessage({ type: 'WRITE_FILE', payload: { name, content } });
+  return chrome.runtime.sendMessage({ type: 'OFFSCREEN_' + type, payload });
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  const handlers = {
-    'WRITE_FILE': () => opfsWrite(msg.payload.name, msg.payload.content),
-    'READ_FILE': () => opfsRead(msg.payload.name),
-  };
-  if (handlers[msg.type]) {
-    handlers[msg.type]().then(sendResponse).catch(e => sendResponse({ error: e.message }));
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'OPFS_WRITE') {
+    sendToOffscreen('WRITE_FILE', msg.payload)
+      .then(() => sendResponse({ success: true }))
+      .catch(e => sendResponse({ error: e.message }));
     return true;
   }
 });
 ```
-
-## Using SQLite with OPFS
-
-For structured storage, use `@sqlite.org/sqlite-wasm` with the `oo1.OpfsDb` API directly in the worker:
-
-```js
-import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-
-const sqlite3 = await sqlite3InitModule();
-const db = new sqlite3.oo1.OpfsDb('/mydb.sqlite3');
-db.exec('CREATE TABLE IF NOT EXISTS ...');
-```
-
-This internally uses `createSyncAccessHandle()` for OPFS access.
 
 ## Key Constraints
 
@@ -207,11 +175,4 @@ This internally uses `createSyncAccessHandle()` for OPFS access.
 4. **Large files on main thread** → Use async `createWritable()` in offscreen
 5. **Using sync handles for large files** → Blocks worker thread; prefer async for >1MB files
 6. **Adding COOP/COEP to manifest** → Not needed, may cause SW issues
-
-## Debugging
-
-Install **OPFS Explorer** extension → DevTools → OPFS Explorer tab to inspect files.
-
-## Reference Implementation
-
-See: https://github.com/clmnin/sqlite-opfs-mv3
+7. **Offscreen intercepting popup messages** → Use `OFFSCREEN_` prefix to namespace messages
