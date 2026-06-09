@@ -9,7 +9,7 @@ async function ensureOffscreenDocument() {
   }
 
   creating = chrome.offscreen.createDocument({
-    url: chrome.runtime.getURL('src/pages/offscreen/index.html'),
+    url: chrome.runtime.getURL('src/offscreen/index.html'),
     reasons: [chrome.offscreen.Reason.WORKERS],
     justification: 'Run SQLite WASM with OPFS for persistent URL/host storage'
   });

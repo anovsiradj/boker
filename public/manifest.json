@@ -8,14 +8,14 @@
     "name": "anovsiradj"
   },
   "background": {
-    "service_worker": "src/pages/background/index.js",
+    "service_worker": "src/background/index.js",
     "type": "module"
   },
   "action": {
-    "default_popup": "src/pages/popup/index.html",
+    "default_popup": "src/popup/index.html",
     "default_title": "Boker - URL Blocker"
   },
-  "options_page": "src/pages/popup/index.html",
+  "options_page": "src/popup/index.html",
   "permissions": [
     "declarativeNetRequest",
     "offscreen"
