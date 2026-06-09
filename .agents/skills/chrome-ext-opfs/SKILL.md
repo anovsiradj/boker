@@ -134,7 +134,7 @@ async function ensureOffscreenDocument() {
   if (await chrome.offscreen.hasDocument?.()) return;
   if (creating) { await creating; return; }
   creating = chrome.offscreen.createDocument({
-    url: chrome.runtime.getURL('src/pages/offscreen/index.html'),
+    url: chrome.runtime.getURL('src//offscreen/index.html'),
     reasons: [chrome.offscreen.Reason.WORKERS],
     justification: 'OPFS requires Web Worker context'
   });

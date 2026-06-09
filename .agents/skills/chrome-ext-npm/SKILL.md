@@ -101,13 +101,13 @@ export default defineConfig({
     target: 'chrome116',
     rollupOptions: {
       input: {
-        offscreen: 'src/pages/offscreen/index.html',
-        background: 'src/pages/background/index.ts',
-        popup: 'src/pages/popup/index.html',
+        offscreen: 'src//offscreen/index.html',
+        background: 'src//background/index.ts',
+        popup: 'src//popup/index.html',
       },
       output: {
-        entryFileNames: 'src/pages/[name]/index.js',
-        chunkFileNames: 'src/pages/[name]/[name]-[hash].js',
+        entryFileNames: 'src//[name]/index.js',
+        chunkFileNames: 'src//[name]/[name]-[hash].js',
         assetFileNames: 'assets/[name].[ext]',
       },
     },
