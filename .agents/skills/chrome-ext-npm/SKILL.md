@@ -25,25 +25,32 @@ Strategies for using npm packages in Manifest V3 Chrome Extensions across all co
 | Content Script | ✅ | ⚠️** | ✅ | ❌ | ✅ |
 
 *WASM in SW: Only async compilation, no `createSyncAccessHandle`  
-**CommonJS: Only via bundler (webpack/esbuild/rollup)
+**CommonJS: Only via bundler (Vite/esbuild/webpack)
 
-## Recommended: ESM + Bundler
+## Recommended: ESM + Bundler (Vite)
 
-Use a bundler (esbuild, rollup, webpack) for production. For development, use native ESM with import maps.
+Use **Vite** as the bundler — it handles ESM resolution, WASM file copying, TypeScript, and source maps out of the box.
 
 ### Project Structure
 
 ```
 extension/
 ├── package.json           # type: "module"
+├── vite.config.ts
+├── public/
+│   └── manifest.json      # Extension manifest (copied as-is)
 ├── src/
-│   ├── background.ts      # Service worker entry
-│   ├── offscreen.ts       # Offscreen document entry
-│   ├── worker.ts          # Web worker entry
-│   ├── popup.ts           # Popup entry
-│   ├── content.ts         # Content script entry
-│   └── shared/            # Shared ESM modules
-├── lib/                   # Copied WASM/assets (gitignored)
+│   ├── pages/
+│   │   ├── background/
+│   │   │   └── index.ts   # Service worker entry
+│   │   ├── offscreen/
+│   │   │   ├── index.html # Offscreen document HTML
+│   │   │   ├── index.ts   # Offscreen document entry
+│   │   │   └── worker.ts  # Web worker entry
+│   │   └── popup/
+│   │       ├── index.html # Popup HTML
+│   │       └── index.ts   # Popup entry
+│   └── (shared modules)
 └── dist/                  # Bundled output (gitignored)
 ```
 
@@ -55,100 +62,120 @@ extension/
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "esbuild --serve=8080 src/background.ts --outdir=dist --format=esm",
-    "build": "esbuild src/background.ts src/offscreen.ts src/worker.ts src/popup.ts src/content.ts --outdir=dist --format=esm --target=chrome100",
-    "copy-wasm": "copyfiles -u 1 node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3*.mjs node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm lib/"
+    "dev": "vite build --mode development --watch",
+    "build": "vite build --mode production"
   },
   "dependencies": {
-    "@sqlite.org/sqlite-wasm": "^3.45.0",
-    "date-fns": "^3.0.0",
-    "zod": "^3.22.0"
+    "@sqlite.org/sqlite-wasm": "^3.53.0",
+    "webextension-polyfill": "^0.12.0"
   },
   "devDependencies": {
-    "esbuild": "^0.20.0",
-    "copyfiles": "^2.4.1"
+    "@types/chrome": "^0.0.258",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "vite-plugin-static-copy": "^1.0.0"
   }
 }
 ```
 
-## Strategy 1: Native ESM (No Bundler, Dev Only)
+### vite.config.ts
 
-```html
-<!-- popup.html / offscreen.html -->
-<script type="importmap">
-{
-  "imports": {
-    "date-fns": "https://esm.sh/date-fns@3",
-    "zod": "https://esm.sh/zod@3"
-  }
-}
-</script>
-<script type="module" src="popup.js"></script>
+```ts
+import { defineConfig } from 'vite';
+import { viteStaticCopy } from 'vite-plugin-static-copy';
+import path from 'path';
+
+const root = path.resolve(__dirname, 'src');
+const pagesDir = path.resolve(root, 'pages');
+const outDir = path.resolve(__dirname, 'dist');
+const publicDir = path.resolve(__dirname, 'public');
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@': root,
+      '@pages': pagesDir,
+    },
+  },
+  plugins: [
+    viteStaticCopy({
+      targets: [
+        { src: 'public/manifest.json', dest: '.' },
+      ],
+    }),
+  ],
+  publicDir,
+  build: {
+    outDir,
+    emptyOutDir: true,
+    sourcemap: true,
+    target: 'chrome116',
+    rollupOptions: {
+      input: {
+        offscreen: path.resolve(pagesDir, 'offscreen', 'index.html'),
+        background: path.resolve(pagesDir, 'background', 'index.ts'),
+        popup: path.resolve(pagesDir, 'popup', 'index.html'),
+      },
+      output: {
+        entryFileNames: 'src/pages/[name]/index.js',
+        chunkFileNames: 'src/pages/[name]/[name]-[hash].js',
+        assetFileNames: 'assets/[name].[ext]',
+      },
+    },
+  },
+});
 ```
+
+### Import Packages Directly
 
 ```js
-// popup.js
-import { format } from 'date-fns';
-import { z } from 'zod';
+// Import from node_modules directly — Vite resolves and bundles
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+import browser from 'webextension-polyfill';
 ```
 
-**Pros:** Zero config, fast iteration, standard `<script type="importmap">`  
-**Cons:** Network dependency, no tree-shaking, CSP issues with external CDN, **only works in documents (popup/offscreen), not in workers**
+No need to copy `.mjs` or `.wasm` files to `lib/` — Vite handles WASM assets automatically.
 
-## Strategy 2: Bundled with esbuild (Recommended)
+## Strategy 2: esbuild (Alternative)
 
 ```js
 // esbuild.config.mjs
 import { build } from 'esbuild';
-import { copyFileSync, mkdirSync, existsSync } from 'fs';
-
-const entries = {
-  background: 'src/background.ts',
-  offscreen: 'src/offscreen.ts',
-  worker: 'src/worker.ts',
-  popup: 'src/popup.ts',
-  content: 'src/content.ts',
-};
 
 await build({
-  entryPoints: Object.values(entries),
+  entryPoints: ['src/background.ts', 'src/offscreen.ts', 'src/worker.ts', 'src/popup.ts'],
   outdir: 'dist',
   format: 'esm',
   target: 'chrome100',
   platform: 'browser',
   bundle: true,
-  splitting: false,
   external: ['chrome'],
-  define: { 'process.env.NODE_ENV': '"production"' },
 });
-
-// Copy WASM files
-if (!existsSync('lib')) mkdirSync('lib', { recursive: true });
-copyFileSync('node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-worker1.mjs', 'lib/sqlite3-worker1.mjs');
-copyFileSync('node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm', 'lib/sqlite3.wasm');
 ```
 
-### Import in Source
+When using esbuild, WASM files must be copied manually:
 
-```js
-// src/worker.ts
-import { sqlite3Worker1Promiser } from '../lib/sqlite3-worker1.mjs'; // Local copy
-import { format } from 'date-fns'; // Bundled
-import { z } from 'zod'; // Bundled
+```bash
+copyfiles -u 3 "node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3*" dist/
 ```
 
-## Strategy 3: WASM Packages (Special Handling)
+## WASM Package Handling
 
-For `@sqlite.org/sqlite-wasm`, `@tensorflow/tfjs`, `pdfjs-dist`:
+### Vite (Recommended)
 
-1. **Copy WASM files to `lib/`** (not bundled)
-2. **Import worker entry point locally** (not from node_modules)
-3. **Set `locateFile` if needed**
+Vite automatically detects `.wasm` files imported from node_modules and copies them to the output `assets/` directory. No special config needed — just import the JS entry point.
+
+### esbuild
+
+esbuild does NOT handle `.wasm` files. You must:
+
+1. Copy `.wasm` files from `node_modules` to the output directory
+2. Import the `.mjs` entry point from a local path (not node_modules)
+3. The `.wasm` path is resolved relative to the JS file at runtime
 
 ```js
-// For pdfjs-dist
-import * as pdfjs from 'pdfjs-dist';
-pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.mjs');
+// Copy as part of build
+copyFileSync('node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm', 'dist/sqlite3.wasm');
 ```
 
 ## Context-Specific Patterns
@@ -156,15 +183,15 @@ pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdf.worker.min.
 ### Service Worker (background.ts)
 
 ```ts
-// Only async, no DOM, no WASM sync APIs
-import { storage } from './shared/storage.js';
+import browser from 'webextension-polyfill';
+import { initStorage } from './shared/storage.js';
 
 chrome.runtime.onInstalled.addListener(async () => {
-  await storage.init();
+  await initStorage();
 });
 ```
 
-### Offscreen Document (offscreen.ts)
+### Offscreen Document (offscreen/index.ts)
 
 ```ts
 // Can spawn workers, has DOM, async only
@@ -175,48 +202,20 @@ const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'modu
 
 ```ts
 // Full WASM + OPFS + sync APIs
-import { sqlite3Worker1Promiser } from '../lib/sqlite3-worker1.mjs';
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 // Self-contained, no chrome.* APIs except messaging
 ```
 
-### Popup/Side Panel (popup.ts)
+### Popup (popup/index.ts)
 
 ```ts
-// Full DOM, can use bundled npm packages
-import { z } from 'zod';
-import { format } from 'date-fns';
-
-const schema = z.object({ domain: z.string().url() });
-```
-
-### Content Script (content.ts)
-
-```ts
-// Isolated world, no direct access to page JS
-// Can use bundled packages
-import { debounce } from 'lodash-es';
-
-const handler = debounce(() => { /* ... */ }, 300);
-```
-
-## Shared Code Pattern
-
-```ts
-// shared/storage.ts - works in ALL contexts
-export async function get(key: string) {
-  if (typeof chrome !== 'undefined' && chrome.storage) {
-    const { [key]: value } = await chrome.storage.local.get(key);
-    return value;
-  }
-  // Fallback for testing
-  return localStorage.getItem(key);
-}
+import browser from 'webextension-polyfill';
+const response = await browser.runtime.sendMessage({ type: 'GET_DATA' });
 ```
 
 ## CSP Requirements
 
 ```json
-// manifest.json
 "content_security_policy": {
   "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
 }
@@ -228,7 +227,6 @@ export async function get(key: string) {
 ## TypeScript Config
 
 ```json
-// tsconfig.json
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -242,7 +240,7 @@ export async function get(key: string) {
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "lib/**/*"]
+  "include": ["src/**/*"]
 }
 ```
 
@@ -257,8 +255,8 @@ npm install -D @types/chrome
 | Issue | Solution |
 |-------|----------|
 | `require is not defined` | Package is CJS only → use bundler or find ESM alternative |
-| `process is not defined` | Define `process.env.NODE_ENV` in build, or use `import.meta.env` |
+| `process is not defined` | Define `process.env.NODE_ENV` in build config |
 | `fs`/`path` not found | Node built-ins not available → use browser polyfills or avoid |
-| WASM 404 | Copy `.wasm` to `lib/`, serve via `chrome.runtime.getURL()` |
-| Worker MIME type | Ensure `.mjs` extension or `type: module` in import |
+| WASM 404 | With Vite: check `assets/` dir for .wasm; with esbuild: copy manually |
+| Worker MIME type | Ensure `{ type: 'module' }` in `new Worker()` call |
 | CSP blocks eval | Use bundler (no eval), or add `'wasm-unsafe-eval'` only |

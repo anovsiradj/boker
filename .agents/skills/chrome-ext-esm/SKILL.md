@@ -41,70 +41,76 @@ Use native ES Modules (ESM) across all Chrome Extension contexts in Manifest V3.
 
 ## Entry Points
 
+### Popup / Offscreen HTML
+
 ```html
-<!-- popup.html / offscreen.html / sidepanel.html -->
+<!-- popup/index.html -->
 <!DOCTYPE html>
 <html>
 <body>
-  <script type="module" src="popup.js"></script>
+  <script type="module" src="index.js"></script>
 </body>
 </html>
 ```
 
+### Service Worker
+
 ```js
-// background.js - service worker
+// background/index.js
 import { initStorage } from './shared/storage.js';
 await initStorage();
 ```
 
-```js
-// content.js - content script
-import { debounce } from './shared/utils.js';
-const handler = debounce(() => {}, 300);
-```
+### Web Worker
 
 ```js
-// offscreen.js - spawns worker
+// offscreen/index.js — spawns worker with ESM
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
 ```
 
 ```js
-// worker.js - web worker
+// offscreen/worker.js — worker entry
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 self.onmessage = async (e) => {
-  const { sqlite3Worker1Promiser } = await import('./lib/sqlite3-worker1.mjs');
   // ...
 };
 ```
 
 ## Import Patterns
 
-### Relative Imports (Recommended)
+### Bare Specifiers (with Vite bundler)
+
+```js
+// Vite resolves these from node_modules
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+import browser from 'webextension-polyfill';
+```
+
+### Relative Imports (works in all contexts)
 
 ```js
 import { foo } from './shared/utils.js';
-import { bar } from '../lib/sqlite3-worker1.mjs';
+import { bar } from '../worker/database.js';
 ```
 
-### Import Maps (For bare specifiers)
+### Import Maps (HTML documents only)
 
 ```html
-<!-- In popup.html, offscreen.html — NOT in workers -->
+<!-- In popup.html, offscreen.html — NOT in workers or service workers -->
 <script type="importmap">
 {
   "imports": {
-    "date-fns": "./lib/date-fns.js",
-    "zod": "./lib/zod.js"
+    "date-fns": "./lib/date-fns.js"
   }
 }
 </script>
 ```
 
-**Note:** Import maps only work in HTML documents (popup, offscreen, side panel). They do **not** work in service workers, web workers, or content scripts. Use relative imports or bundlers for those contexts.
+**Import maps only work in HTML documents** (popup, offscreen, side panel). They do **not** work in service workers, web workers, or content scripts. Use a bundler (Vite) for those contexts.
 
-### Dynamic Imports (Code Splitting)
+### Dynamic Imports
 
 ```js
-// Load heavy module only when needed
 const { heavy } = await import('./heavy-module.js');
 ```
 
@@ -112,26 +118,23 @@ const { heavy } = await import('./heavy-module.js');
 
 ```
 src/
-├── background.js
-├── offscreen.js
-├── worker.js
-├── popup.js
-├── content.js
+├── pages/
+│   ├── background/index.js
+│   ├── offscreen/index.js
+│   └── popup/index.js
 └── shared/
     ├── storage.js      # chrome.storage wrapper
     ├── messaging.js    # Message types + helpers
-    ├── types.js        # TypeScript interfaces
     └── utils.js        # Pure functions
 ```
 
 ```js
-// shared/storage.js - works everywhere
+// shared/storage.js — works everywhere
 export async function get(key, defaultValue) {
   if (globalThis.chrome?.storage?.local) {
     const { [key]: value } = await chrome.storage.local.get(key);
     return value ?? defaultValue;
   }
-  // Fallback for testing
   return localStorage.getItem(key) ?? defaultValue;
 }
 ```
@@ -139,7 +142,6 @@ export async function get(key, defaultValue) {
 ## TypeScript Setup
 
 ```json
-// tsconfig.json
 {
   "compilerOptions": {
     "target": "ES2022",
@@ -157,26 +159,37 @@ export async function get(key, defaultValue) {
 }
 ```
 
-## Importing WASM/Worker Files
+## Bundler Setup (Vite)
 
-```js
-// For WASM packages, import the .mjs entry point
-import { sqlite3Worker1Promiser } from './lib/sqlite3-worker1.mjs';
-
-// For worker entry points, use URL + import.meta.url
-const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+```ts
+// vite.config.ts
+export default defineConfig({
+  build: {
+    target: 'chrome116',
+    rollupOptions: {
+      input: {
+        offscreen: 'src/pages/offscreen/index.html',
+        background: 'src/pages/background/index.ts',
+        popup: 'src/pages/popup/index.html',
+      },
+      output: {
+        entryFileNames: 'src/pages/[name]/index.js',
+      },
+    },
+  },
+});
 ```
 
-## Common Issues
+Vite bundles all imports, resolves bare specifiers from `node_modules`, and handles `.wasm` assets automatically.
 
-| Issue | Fix |
-|-------|-----|
-| `Unexpected token 'export'` | File not loaded as module — check `type: "module"` or `<script type="module">` |
-| `Cannot use import statement outside module` | Same as above |
-| `ERR_UNKNOWN_URL_SCHEME` | Use relative paths or `chrome.runtime.getURL()` |
-| `SharedArrayBuffer` errors | Add COOP/COEP headers to manifest |
-| Worker not loading | Ensure `.js` extension, `{ type: "module" }`, and correct path |
-| Circular imports | Restructure shared modules, use dynamic import for one side |
+## WASM Module Import
+
+```js
+// Direct import from node_modules — Vite bundles the JS wrapper and copies .wasm
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+```
+
+No need to copy `.wasm` files to `lib/` or configure `locateFile` when using Vite.
 
 ## CSP Requirements
 
@@ -189,8 +202,19 @@ const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'modu
 - No `'unsafe-eval'` needed for ESM (only for bundled IIFE)
 - `'wasm-unsafe-eval'` for WASM instantiation
 
+## Common Issues
+
+| Issue | Fix |
+|-------|-----|
+| `Unexpected token 'export'` | File not loaded as module — check `type: "module"` or `<script type="module">` |
+| `Cannot use import statement outside module` | Same as above |
+| `ERR_UNKNOWN_URL_SCHEME` | Use relative paths or `chrome.runtime.getURL()` |
+| Worker not loading | Ensure `.js` extension, `{ type: "module" }`, and correct path |
+| Circular imports | Restructure shared modules, use dynamic import for one side |
+| `SharedArrayBuffer is not defined` | Not needed for sqlite-wasm — remove COOP/COEP headers |
+
 ## Debugging
 
-- DevTools → Sources → shows original module files
-- Source maps work automatically with TypeScript + esbuild
+- DevTools → Sources → shows original module files (with Vite source maps)
 - Console errors show correct file:line
+- Worker console available via `chrome://inspect` → Workers

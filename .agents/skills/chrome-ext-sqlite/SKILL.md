@@ -20,9 +20,7 @@ Run SQLite in Chrome Extensions using the official `@sqlite.org/sqlite-wasm` pac
 npm install @sqlite.org/sqlite-wasm
 ```
 
-Key files from `node_modules/@sqlite.org/sqlite-wasm/dist/`:
-- `sqlite3-worker1.mjs` — Worker-based promise API (use this)
-- `sqlite3.wasm` — WASM binary (copy to extension `lib/`)
+No manual copying of WASM files needed when using a bundler like Vite — it resolves `node_modules` imports and copies `.wasm` automatically.
 
 ## Architecture
 
@@ -36,112 +34,199 @@ chrome.runtime.sendMessage
 Offscreen Document (chrome.offscreen.createDocument + WORKERS)
        │
        ▼
-Web Worker (new Worker('./sqlite-worker.js', { type: 'module' }))
+Web Worker (new Worker('./worker.js', { type: 'module' }))
        │
        ▼
-sqlite3Worker1Promiser → @sqlite.org/sqlite-wasm → OPFS (createSyncAccessHandle)
+sqlite3InitModule → oo1.OpfsDb → OPFS (createSyncAccessHandle)
 ```
 
-## SQLite Worker Template
+**Use `sqlite3InitModule` + `oo1.OpfsDb` directly, not `sqlite3Worker1Promiser`.** The `OpfsDb` API is simpler — it wraps the promiser internally and provides a synchronous `exec()` API inside the worker.
+
+## Worker Database Module
 
 ```js
-// sqlite-worker.js
-import { sqlite3Worker1Promiser } from './lib/sqlite3-worker1.mjs';
+// worker/database.js
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 
-let promiser = null;
-let dbId = null;
-const CURRENT_SCHEMA_VERSION = 2;
+let db = null;
 
-async function init() {
-  if (promiser) return;
-  promiser = await new Promise(resolve => {
-    const p = sqlite3Worker1Promiser({ onready: () => resolve(p) });
+export async function initDatabase() {
+  if (db) return;
+  const sqlite3 = await sqlite3InitModule({
+    print: (...args) => console.log(...args),
+    printErr: (...args) => console.error(...args),
   });
-  const { dbId: id } = await promiser('open', {
-    filename: 'file:my-db.sqlite3?vfs=opfs',
-  });
-  dbId = id;
-  await runMigrations();
+  const oo = sqlite3.oo1;
+  if ('OpfsDb' in oo) {
+    db = new oo.OpfsDb('/boker.sqlite3');
+  } else {
+    db = new oo.DB('/boker.sqlite3', 'ct');
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hosts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      domain TEXT NOT NULL,
+      subdomain TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(domain, subdomain)
+    );
+    CREATE TABLE IF NOT EXISTS links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL UNIQUE,
+      host_id INTEGER NOT NULL,
+      title TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_links_host_id ON links(host_id);
+    CREATE INDEX IF NOT EXISTS idx_hosts_domain ON hosts(domain);
+  `);
 }
 
-async function runMigrations() {
-  await promiser('exec', { dbId, sql: `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)` });
-  const { result: { rows } } = await promiser('exec', { dbId, sql: 'SELECT version FROM schema_version' });
-  let currentVersion = rows[0]?.version ?? 0;
-
-  if (currentVersion < 1) {
-    await promiser('exec', { dbId, sql: `
-      CREATE TABLE IF NOT EXISTS hosts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        domain TEXT NOT NULL,
-        subdomain TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(domain, subdomain)
-      );
-      CREATE TABLE IF NOT EXISTS links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        url TEXT NOT NULL UNIQUE,
-        host_id INTEGER NOT NULL,
-        title TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (host_id) REFERENCES hosts(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_links_host_id ON links(host_id);
-      CREATE INDEX IF NOT EXISTS idx_hosts_domain ON hosts(domain);
-    ` });
-    await promiser('exec', { dbId, sql: 'INSERT INTO schema_version (version) VALUES (1)' });
-    currentVersion = 1;
-  }
-
-  if (currentVersion < 2) {
-    await promiser('exec', { dbId, sql: `
-      CREATE TRIGGER IF NOT EXISTS hosts_updated_at AFTER UPDATE ON hosts
-      BEGIN UPDATE hosts SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END;
-      CREATE TRIGGER IF NOT EXISTS links_updated_at AFTER UPDATE ON links
-      BEGIN UPDATE links SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END;
-    ` });
-    await promiser('exec', { dbId, sql: 'UPDATE schema_version SET version = 2' });
-  }
+function exec(sql, bind = []) {
+  const results = [];
+  db.exec({
+    sql, bind,
+    rowMode: 'object',
+    callback: (row) => results.push(row),
+  });
+  return results;
 }
+```
 
-self.onmessage = async ({ data: { id, type, payload } }) => {
+## Worker Message Handler
+
+```js
+// worker.js
+import { initDatabase, insertHost, insertLink } from './worker/database.js';
+
+self.onmessage = async (event) => {
+  const { id, type, payload } = event.data;
   try {
-    await init();
+    await initDatabase();
     let result;
     switch (type) {
-      case 'EXEC': {
-        const { sql, bind = [] } = payload;
-        const resp = await promiser('exec', { dbId, sql, bind });
-        result = resp.result.rows;
+      case 'GET_BLOCKED_DOMAINS':
+        result = exec('SELECT DISTINCT domain FROM hosts WHERE subdomain IS NULL')
+          .map(r => r.domain);
         break;
-      }
-      case 'QUERY': {
-        const { sql, bind = [] } = payload;
-        const resp = await promiser('exec', { dbId, sql, bind });
-        result = resp.result.rows;
+      case 'INSERT_HOST':
+        result = exec(`
+          INSERT INTO hosts (domain, subdomain) VALUES (?, ?)
+          ON CONFLICT(domain, subdomain) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+          RETURNING id
+        `, [payload.domain, payload.subdomain])[0]?.id;
         break;
-      }
-      case 'TRANSACTION': {
-        await promiser('exec', { dbId, sql: 'BEGIN' });
-        try {
-          for (const stmt of payload.statements) {
-            await promiser('exec', { dbId, sql: stmt.sql, bind: stmt.bind });
-          }
-          await promiser('exec', { dbId, sql: 'COMMIT' });
-          result = { success: true };
-        } catch (e) {
-          await promiser('exec', { dbId, sql: 'ROLLBACK' });
-          throw e;
-        }
-        break;
-      }
     }
     self.postMessage({ id, payload: result });
-  } catch (e) { self.postMessage({ id, error: e.message }); }
+  } catch (err) {
+    self.postMessage({ id, error: err.message });
+  }
 };
 ```
+
+## Offscreen Document Bridge
+
+```js
+// offscreen/index.js
+const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+
+const pendingRequests = new Map();
+
+worker.onmessage = (event) => {
+  const { id, payload, error } = event.data;
+  const resolver = pendingRequests.get(id);
+  if (resolver) {
+    pendingRequests.delete(id);
+    error ? resolver.reject(new Error(error)) : resolver.resolve(payload);
+  }
+};
+
+function sendToWorker(type, payload) {
+  return new Promise((resolve, reject) => {
+    const id = crypto.randomUUID();
+    const timeout = setTimeout(() => {
+      pendingRequests.delete(id);
+      reject(new Error(`Worker timeout for ${type}`));
+    }, 10000);
+    pendingRequests.set(id, { resolve, reject, timeout });
+    worker.postMessage({ id, type, payload });
+  });
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  handleMessage(message).then(sendResponse).catch(err => sendResponse({ error: err.message }));
+  return true;
+});
+
+async function handleMessage(message) {
+  const { type, payload } = message;
+  switch (type) {
+    case 'INIT_DB':
+      await sendToWorker('INIT_DB');
+      return { success: true };
+    case 'INSERT_HOST':
+      return { hostId: await sendToWorker('INSERT_HOST', payload) };
+    case 'GET_BLOCKED_DOMAINS':
+      return { domains: await sendToWorker('GET_BLOCKED_DOMAINS', payload) };
+    case 'EXPORT_DB':
+      return { data: await sendToWorker('EXPORT_DB') };
+    case 'IMPORT_DB':
+      return await sendToWorker('IMPORT_DB', payload);
+    default:
+      throw new Error(`Unknown message type: ${type}`);
+  }
+}
+```
+
+## Background Bridge
+
+```js
+// background/index.js
+let creating = null;
+
+async function ensureOffscreenDocument() {
+  if (await chrome.offscreen.hasDocument?.()) return;
+  if (creating) { await creating; return; }
+  creating = chrome.offscreen.createDocument({
+    url: chrome.runtime.getURL('src/pages/offscreen/index.html'),
+    reasons: [chrome.offscreen.Reason.WORKERS],
+    justification: 'Run SQLite WASM with OPFS for persistent storage'
+  });
+  await creating;
+  creating = null;
+}
+
+async function sendToOffscreen(type, payload = {}) {
+  await ensureOffscreenDocument();
+  return chrome.runtime.sendMessage({ type, payload });
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'GET_BLOCKED_DOMAINS') {
+    sendToOffscreen('GET_BLOCKED_DOMAINS')
+      .then(response => sendResponse({ domains: response.domains || [] }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+  // ... other handlers
+});
+```
+
+## Manifest Requirements
+
+```json
+{
+  "permissions": ["offscreen"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
+```
+
+**COOP/COEP headers are NOT required.** Do NOT add `cross_origin_embedder_policy` or `cross_origin_opener_policy` — they work without them and may cause service worker issues.
 
 ## Upsert Patterns
 
@@ -156,58 +241,15 @@ INSERT INTO links (url, host_id, title) VALUES (?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET title = excluded.title, updated_at = CURRENT_TIMESTAMP
 RETURNING id
 
--- Always include updated_at + trigger
+-- Always include created_at + updated_at + trigger
 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 CREATE TRIGGER links_updated_at AFTER UPDATE ON links
 BEGIN UPDATE links SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; END
 ```
 
-## Background Bridge
-
-```js
-// background.js
-async function sendToWorker(type, payload) {
-  await ensureOffscreen();
-  return chrome.runtime.sendMessage({ type, payload });
-}
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const handlers = {
-    'DB_EXEC': () => sendToWorker('EXEC', msg.payload),
-    'DB_QUERY': () => sendToWorker('QUERY', msg.payload),
-    'DB_TRANSACTION': () => sendToWorker('TRANSACTION', msg.payload),
-  };
-  if (handlers[msg.type]) {
-    handlers[msg.type]().then(sendResponse).catch(e => sendResponse({ error: e.message }));
-    return true;
-  }
-});
-```
-
-## Manifest Requirements
-
-```json
-{
-  "permissions": ["offscreen"],
-  "cross_origin_embedder_policy": { "value": "require-corp" },
-  "cross_origin_opener_policy": { "value": "same-origin" },
-  "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-  }
-}
-```
-
-## File Copy (Build Step)
-
-```js
-// Copy to extension lib/ folder for distribution
-// sqlite3-worker1.mjs
-// sqlite3.wasm
-```
-
 ## Performance Tips
 
-- Use `sqlite3Worker1Promiser` (worker-based) — keeps main thread free
+- Use `oo1.OpfsDb` directly (not `sqlite3Worker1Promiser`) — simpler API, same performance
 - Batch inserts in transactions
 - Add indexes on foreign keys and query columns
 - Use `RETURNING` clause to avoid extra SELECT
@@ -215,16 +257,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 ## Debugging
 
+- Worker console shows `sqlite3 module loaded` and `OpfsDb available` when working
 - OPFS Explorer extension → inspect database file
-- `sqlite3Worker1Promiser` exposes `sqlite3.capi` for low-level debugging
-- Log SQL: wrap `promiser('exec')` with console.log
+- Log SQL: wrap `db.exec()` with console.log
 
 ## Common Errors
 
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `Worker is not defined` | Importing in service worker | Only import in Web Worker (spawned from offscreen) |
-| `OPFS not available` | Missing COOP/COEP or not in worker | Check headers, ensure running in Web Worker |
-| `SharedArrayBuffer not defined` | Missing headers | Add COOP/COEP to manifest |
+| `OPFS not available` | Not in Web Worker context | Ensure offscreen uses `Reason.WORKERS` and spawns a Worker |
 | `database is locked` | Concurrent writes | Use transactions, single writer pattern |
-| `WASM not loaded` | Wrong path to .wasm | Copy `sqlite3.wasm` to same folder as worker, or configure `locateFile` |
+| `WASM not loaded` | Bundler didn't copy .wasm | Check dist/ for .wasm files; Vite copies automatically |
+| `sqlite3 module not found` | Wrong import path | Import from `@sqlite.org/sqlite-wasm` directly (not from lib/) |
