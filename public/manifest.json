@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Boker - URL Blocker",
+  "short_name": "Boker",
+  "version": "1.0.0",
+  "description": "Simple URL blocker extension by domain/subdomain with SQLite OPFS storage",
+  "author": {
+    "name": "anovsiradj"
+  },
+  "background": {
+    "service_worker": "src/pages/background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/pages/popup/index.html",
+    "default_title": "Boker - URL Blocker"
+  },
+  "options_page": "src/pages/popup/index.html",
+  "permissions": [
+    "declarativeNetRequest",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
