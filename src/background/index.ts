@@ -19,12 +19,16 @@ async function ensureOffscreenDocument() {
 
 async function sendToOffscreen(type: string, payload: any = {}) {
   await ensureOffscreenDocument();
+  // QUIRK: chrome.runtime.sendMessage broadcasts to all extension contexts (popup, background, offscreen).
+  // We prefix offscreen messages with 'OFFSCREEN_' so the offscreen document can filter them and avoid collisions.
   return chrome.runtime.sendMessage({ type: 'OFFSCREEN_' + type, payload });
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'UPDATE_RULES') {
-    updateRules(message.payload.domains).then(() => sendResponse({ success: true }));
+    updateRules(message.payload.domains)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ error: err.message }));
     return true;
   }
 
@@ -65,18 +69,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === 'IMPORT_DB') {
     sendToOffscreen('IMPORT_DB', message.payload)
-      .then(response => sendResponse(response))
+      .then(async (response) => {
+        if (response?.success) {
+          const domainsResp = await sendToOffscreen('GET_BLOCKED_DOMAINS');
+          const domains = Array.isArray(domainsResp) ? domainsResp : domainsResp?.domains || [];
+          await updateRules(domains);
+        }
+        sendResponse(response);
+      })
       .catch(err => sendResponse({ error: err.message }));
     return true;
   }
 });
 
 async function updateRules(domains: string[]) {
+  // QUIRK: Deduplicate domains to prevent duplicate rule IDs which throws a fatal Chrome DNR error ("Rule identifiers must be unique").
+  const uniqueDomains = [...new Set(domains || [])].filter(Boolean);
   const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
   const removeRuleIds = existingRules.map(rule => rule.id);
 
   const RULE_ID_BASE = 1000;
-  const addRules = domains.map((domain, index) => ({
+  const addRules = uniqueDomains.map((domain, index) => ({
     id: RULE_ID_BASE + index,
     priority: 1,
     action: { type: 'block' as const },

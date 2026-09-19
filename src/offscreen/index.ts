@@ -29,6 +29,7 @@ function sendToWorker(type: string, payload: any) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const { type, payload } = message;
+  // QUIRK: Ignore messages not intended for the offscreen document (since runtime.sendMessage broadcasts globally).
   if (!type || !type.startsWith('OFFSCREEN_')) return;
 
   handleOffscreenMessage(type.slice('OFFSCREEN_'.length), payload)

@@ -14,6 +14,8 @@ export async function initDatabase() {
   if (db) return;
   log('Initializing database...');
 
+  // QUIRK: sqlite3 WASM with OPFS (OpfsDb) requires a Web Worker context 
+  // because createSyncAccessHandle() is only available inside Web Workers.
   const sqlite3 = await sqlite3InitModule({
     print: log,
     printErr: error,
