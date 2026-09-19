@@ -25,6 +25,6 @@ tabel `host` digunakan untuk simpan domain/host dari hasil parse URL yang dimasu
 
 selalu bikin backup file db ketika import file db dari user.
 
-# app
+## app
 user bisa imput URL yang sama berkali-kali.
 tersedia fitur export/import file db.
