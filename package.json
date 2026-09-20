@@ -10,13 +10,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --mode development --watch",
-    "build": "vite build --mode production"
+    "build": "vite build --mode production",
+    "test": "playwright test"
   },
   "dependencies": {
     "@sqlite.org/sqlite-wasm": "^3.53.0-build1",
     "webextension-polyfill": "^0.12.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/chrome": "^0.0.258",
     "@types/node": "^20.10.0",
     "@types/webextension-polyfill": "^0.10.0",
