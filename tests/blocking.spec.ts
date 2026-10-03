@@ -1,50 +1,65 @@
-import { test, expect, chromium } from '@playwright/test';
+import { test, expect, chromium, type BrowserContext, type Worker } from '@playwright/test';
 import path from 'path';
-
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const extensionPath = path.resolve(__dirname, '../dist');
+const TEST_DOMAIN = 'example.com';
 
-test('Extension should block a URL after adding it', async () => {
-  const extensionPath = path.resolve(__dirname, '../dist');
-  
-  // Launch browser with extension loaded
-  const browserContext = await chromium.launchPersistentContext('', {
-    headless: false,
+test.describe.configure({ mode: 'serial' });
+
+let context: BrowserContext;
+let serviceWorker: Worker;
+let extensionId: string;
+
+test.beforeAll(async () => {
+  context = await chromium.launchPersistentContext('', {
+    // 'chromium' channel uses the new headless mode, which supports MV3 extensions.
+    channel: 'chromium',
     args: [
       `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`
-    ]
+      `--load-extension=${extensionPath}`,
+    ],
   });
 
-  // Wait for background page to load
-  let backgroundPage = browserContext.backgroundPages()[0];
-  while (!backgroundPage) {
-    await new Promise(r => setTimeout(r, 500));
-    backgroundPage = browserContext.backgroundPages()[0];
-  }
-  const extensionId = backgroundPage.url().split('/')[2];
-  
-  const page = await browserContext.newPage();
-  
-  // 1. Add URL to block
+  // MV3 background is a service worker, NOT a background page.
+  let [sw] = context.serviceWorkers();
+  if (!sw) sw = await context.waitForEvent('serviceworker');
+  serviceWorker = sw;
+  extensionId = sw.url().split('/')[2];
+});
+
+test.afterAll(async () => {
+  await context?.close();
+});
+
+test('adding a URL creates a DNR rule and blocks navigation', async () => {
+  const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
-  await page.fill('#urlInput', 'https://example.com');
+  await page.fill('#urlInput', `https://${TEST_DOMAIN}`);
   await page.click('#addBtn');
 
-  // 2. Verify blocked host rendered
-  const blockedItem = await page.locator('.domain-name', { hasText: 'example.com' });
-  await expect(blockedItem).toBeVisible();
+  await expect(page.locator('.domain-name', { hasText: TEST_DOMAIN })).toBeVisible();
 
-  // 3. Verify blocking (navigation should be blocked)
-  const targetPage = await browserContext.newPage();
-  // Expect navigation to example.com to fail/be blocked
-  const response = await targetPage.goto('https://example.com').catch(() => null);
-  
-  // DNR blocking for main_frame usually navigates to an error page or fails
-  // Verifying by checking if the page URL changed to example.com
-  expect(targetPage.url()).not.toBe('https://example.com/');
+  // Regression guard: the dynamic DNR rule must exist after adding via the UI.
+  const rules = await serviceWorker.evaluate(() =>
+    chrome.declarativeNetRequest.getDynamicRules()
+  );
+  const hasBlockRule = rules.some(
+    (rule) =>
+      rule.action.type === 'block' &&
+      (rule.condition.requestDomains?.includes(TEST_DOMAIN) ?? false)
+  );
+  expect(hasBlockRule).toBe(true);
 
-  await browserContext.close();
+  // Navigation to the blocked domain must fail with ERR_BLOCKED_BY_CLIENT.
+  const target = await context.newPage();
+  let blockedByClient = false;
+  try {
+    await target.goto(`https://${TEST_DOMAIN}`, { timeout: 15000 });
+  } catch (error) {
+    blockedByClient = /ERR_BLOCKED_BY_CLIENT/.test(String((error as Error).message));
+  }
+  const navigatedAway = target.url() !== `https://${TEST_DOMAIN}/`;
+  expect(blockedByClient || navigatedAway).toBe(true);
 });

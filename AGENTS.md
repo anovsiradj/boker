@@ -1,10 +1,12 @@
+# Development Guidelines
+
 ## Ruang Lingkup
 - must work on chrome browser
-- future plan for work on firefox browser
-- no plan for work on safari browser
+- in the future planning to work on firefox browser
+- no planning to work on safari browser
 - use standard web extension when chrome browser supports it
 
-## dev
+## Chrome/Browser Stacks
 - pakai SQLite sebagai tempat penyimpanan data
 - pakai Origin Private File System (OPFS) untuk menaruh file SQLite dalam extension
 

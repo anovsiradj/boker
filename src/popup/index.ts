@@ -37,13 +37,26 @@ function renderBlockedDomains(domains: string[]) {
   domains.forEach((domain) => {
     const li = document.createElement('li');
     li.className = 'blocked-item';
-    li.innerHTML = `
-      <div class="domain-info">
-        <span class="domain-name">${domain}</span>
-        <span class="domain-sub">Host</span>
-      </div>
-      <button class="remove-btn danger" data-host="${domain}">Remove</button>
-    `;
+
+    const info = document.createElement('div');
+    info.className = 'domain-info';
+
+    const name = document.createElement('span');
+    name.className = 'domain-name';
+    name.textContent = domain;
+
+    const sub = document.createElement('span');
+    sub.className = 'domain-sub';
+    sub.textContent = 'Host';
+
+    info.append(name, sub);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn danger';
+    removeBtn.dataset.host = domain;
+    removeBtn.textContent = 'Remove';
+
+    li.append(info, removeBtn);
     blockedList.appendChild(li);
   });
 }
@@ -91,10 +104,9 @@ async function addUrl() {
     }
 
     const domains = await loadBlockedDomains();
-    if (!domains.includes(parsed.hostname)) {
-      domains.push(parsed.hostname);
-      await saveBlockedDomains(domains);
-    }
+    // Jaga-jaga terhadap race cold-start: pastikan host ada, lalu SELALU sinkronkan rule.
+    if (!domains.includes(parsed.hostname)) domains.push(parsed.hostname);
+    await saveBlockedDomains(domains);
 
     urlInput.value = '';
     renderBlockedDomains(await loadBlockedDomains());

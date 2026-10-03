@@ -94,10 +94,10 @@ async function updateRules(domains: string[]) {
     priority: 1,
     action: { type: 'block' as const },
     condition: {
-      urlFilter: `||${domain}`,
+      requestDomains: [domain],
       resourceTypes: [
         'main_frame', 'sub_frame', 'script', 'xmlhttprequest',
-        'image', 'stylesheet', 'font', 'object', 'ping',
+        'image', 'stylesheet', 'font', 'object', 'ping', 'csp_report',
         'media', 'websocket', 'webtransport', 'webbundle', 'other'
       ]
     }

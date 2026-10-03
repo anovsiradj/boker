@@ -19,8 +19,14 @@ Dokumen ini menjelaskan cara menjalankan pengujian otomatis untuk Chrome Extensi
    npm run test
    ```
 
-## Menjaga ID Extension Tetap Konsisten (Penting untuk Tes)
-Agar ID extension tidak berubah-ubah (penting agar `tests/blocking.spec.ts` tidak perlu diperbarui terus-menerus), tambahkan field `"key"` di dalam `public/manifest.json`.
+> Tes memakai Playwright dengan `channel: 'chromium'` (mode **new headless**) agar extension
+> Manifest V3 bisa dimuat tanpa layar. Jangan memakai mode headless lama — mode itu tidak
+> mendukung extension.
+
+## Menjaga ID Extension Tetap Konsisten (Opsional untuk Tes)
+Tes mengambil ID extension secara otomatis dari URL service worker, jadi tidak wajib
+di-pin. Bila ingin ID yang tetap (mis. untuk allow-list di server), tambahkan field `"key"`
+di `public/manifest.json`.
 
 1. **Generate Kunci RSA** (atau gunakan kunci yang sudah ada):
    ```bash
@@ -36,14 +42,31 @@ Agar ID extension tidak berubah-ubah (penting agar `tests/blocking.spec.ts` tida
      "key": "ISI_BASE64_PUBLIC_KEY_DISINI"
    }
    ```
-4. **Update ID di Tes**:
-   - Setelah menambahkan `key`, *load* ulang extension di Chrome (`chrome://extensions/`).
-   - Salin ID extension yang muncul.
-   - Perbarui variabel `EXTENSION_ID` di file `tests/blocking.spec.ts`.
 
 ## Penjelasan Tes (`tests/blocking.spec.ts`)
 Tes ini melakukan langkah-langkah berikut secara otomatis:
-1. Membuka browser dengan extension Boker dimuat.
-2. Menavigasi ke popup dan menambahkan `https://example.com` ke daftar blokir.
-3. Memastikan domain tersebut muncul di UI daftar blokir.
-4. Membuka tab baru untuk mencoba mengakses `https://example.com` dan memverifikasi bahwa navigasi tersebut diblokir atau gagal (sesuai perilaku DNR).
+1. Membuka browser (persistent context) dengan extension Boker dimuat dari folder `dist/`.
+2. Menunggu **service worker** MV3 muncul, lalu mengambil extension ID dari URL-nya.
+3. Membuka popup dan menambahkan `https://example.com` ke daftar blokir.
+4. Memastikan domain tersebut muncul di UI daftar blokir.
+5. Memastikan **dynamic rule** `declarativeNetRequest` benar-benar terbentuk:
+   ```js
+   chrome.declarativeNetRequest.getDynamicRules()
+   ```
+6. Membuka tab baru untuk mencoba mengakses `https://example.com` dan memverifikasi
+   navigasi diblokir (`net::ERR_BLOCKED_BY_CLIENT`).
+
+## Catatan Manifest V3
+- Background berjalan sebagai **service worker**, bukan *background page*. Gunakan
+  `context.serviceWorkers()` (Playwright) — `context.backgroundPages()` selalu kosong di MV3.
+- Dynamic rule DNR **persisten** lintas sesi/upgrade, jadi tidak perlu di-rebuild saat startup.
+
+## Debugging Manual
+1. Buka `chrome://extensions/`, aktifkan *Developer mode*, lalu reload extension.
+2. Klik *service worker* pada kartu extension untuk membuka DevTools-nya.
+3. Cek rule yang aktif:
+   ```js
+   chrome.declarativeNetRequest.getDynamicRules().then(console.log)
+   ```
+4. Tambah URL lewat popup, lalu pastikan rule bertambah dan halaman yang diblokir
+   menampilkan `ERR_BLOCKED_BY_CLIENT`.
